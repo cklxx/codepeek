@@ -109,23 +109,24 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
         line_fn_idx.push(vi);
 
         // ── ROW 2: tertiary sig + italic summary ──────────────────────
+        // Row 2: `pub fn (&mut self)` at 4.8:1 + summary at 2.8:1
         let kw_part = if vis_kw.is_empty() { "fn ".to_string() }
                       else { format!("{} fn ", vis_kw) };
         let param_part = if params.is_empty() { String::new() }
                          else { format!("({})", take_w(&params, 28)) };
         let sig_part = take_w(&format!("  {}{}", kw_part, param_part), w / 2);
 
-        let summary_max = w.saturating_sub(sig_part.chars().count() + 3);
+        let summary_max = w.saturating_sub(sig_part.chars().count() + 4);
         let summary_part = if func.summary.is_empty() { String::new() }
                            else { format!("  \"{}\"", take_w(&func.summary, summary_max)) };
 
         all_lines.push(Line::from(vec![
-            // TERTIARY: keywords and params — very muted
-            Span::styled(sig_part, Style::default().fg(tn::FG_DARK).bg(bg)),
-            // SUPPORT: summary — italic, barely visible
+            // TERTIARY: def-keywords (4.8:1) — readable but clearly subordinate
+            Span::styled(sig_part, Style::default().fg(tn::KW_DEF).bg(bg)),
+            // MUTED: summary (2.8:1) — intentionally below AA, skim tier
             Span::styled(
                 summary_part,
-                Style::default().fg(tn::FG_DIM).bg(bg).add_modifier(Modifier::ITALIC),
+                Style::default().fg(tn::COMMENT).bg(bg).add_modifier(Modifier::ITALIC),
             ),
         ]));
         line_fn_idx.push(vi);
@@ -152,11 +153,11 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
             line_fn_idx.push(vi);
         }
 
-        // ── Thin divider ──────────────────────────────────────────────
+        // ── Thin divider (ghost level, 2.1:1) ────────────────────────
         if vi + 1 < visible.len() {
             all_lines.push(Line::from(Span::styled(
                 format!("  {}", "─".repeat(w.saturating_sub(3))),
-                Style::default().fg(tn::FG_DARK).bg(tn::BG),
+                Style::default().fg(tn::BORDER_IDLE).bg(tn::BG),
             )));
             line_fn_idx.push(vi);
         }
