@@ -89,6 +89,11 @@ fn run_app(
             return Ok(());
         }
 
+        // Clear transient status on any keypress
+        if !state.status_msg.is_empty() {
+            state.status_msg.clear();
+        }
+
         match &state.mode {
             AppMode::Search => handle_search(state, key.code),
             AppMode::Normal => {
@@ -102,10 +107,21 @@ fn run_app(
 
 fn handle_normal(state: &mut AppState, key: KeyCode) -> Result<bool> {
     match key {
-        KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+        KeyCode::Char('q') => return Ok(true),
 
-        // Tab: cycle focus tree → fns → source
-        KeyCode::Tab | KeyCode::BackTab => {
+        // Esc: context-sensitive back
+        KeyCode::Esc => match state.focus {
+            PanelFocus::SourceView   => state.focus = if state.functions.is_empty() {
+                PanelFocus::FileTree
+            } else {
+                PanelFocus::FunctionList
+            },
+            PanelFocus::FunctionList => state.focus = PanelFocus::FileTree,
+            PanelFocus::FileTree     => return Ok(true),
+        },
+
+        // Tab: cycle forward tree → fns → source
+        KeyCode::Tab => {
             state.focus = match state.focus {
                 PanelFocus::FileTree => {
                     if state.functions.is_empty() { PanelFocus::SourceView }
@@ -113,6 +129,18 @@ fn handle_normal(state: &mut AppState, key: KeyCode) -> Result<bool> {
                 }
                 PanelFocus::FunctionList => PanelFocus::SourceView,
                 PanelFocus::SourceView => PanelFocus::FileTree,
+            };
+        }
+
+        // BackTab / h: cycle backward / go left
+        KeyCode::BackTab | KeyCode::Char('h') => {
+            state.focus = match state.focus {
+                PanelFocus::FileTree => PanelFocus::SourceView,
+                PanelFocus::FunctionList => PanelFocus::FileTree,
+                PanelFocus::SourceView => {
+                    if state.functions.is_empty() { PanelFocus::FileTree }
+                    else { PanelFocus::FunctionList }
+                }
             };
         }
 
@@ -130,13 +158,19 @@ fn handle_normal(state: &mut AppState, key: KeyCode) -> Result<bool> {
             PanelFocus::SourceView   => state.source_scroll_up(1),
         },
 
-        // d / u — half-page scroll in source
-        KeyCode::Char('d') => if state.focus == PanelFocus::SourceView {
-            state.source_scroll_down(20);
-        },
-        KeyCode::Char('u') => if state.focus == PanelFocus::SourceView {
-            state.source_scroll_up(20);
-        },
+        // d / u — half-page scroll in source (works from any panel)
+        KeyCode::Char('d') => state.source_scroll_down(20),
+        KeyCode::Char('u') => state.source_scroll_up(20),
+
+        // n / N — next/prev function, sync source
+        KeyCode::Char('n') => {
+            state.fn_select_next();
+            state.focus = PanelFocus::FunctionList;
+        }
+        KeyCode::Char('N') => {
+            state.fn_select_prev();
+            state.focus = PanelFocus::FunctionList;
+        }
 
         // g / G — go to top / bottom
         KeyCode::Char('g') => match state.focus {
@@ -158,22 +192,30 @@ fn handle_normal(state: &mut AppState, key: KeyCode) -> Result<bool> {
             }
         },
 
-        // Enter / l — activate
+        // Enter / l — activate / go right
         KeyCode::Enter | KeyCode::Char('l') => match state.focus {
             PanelFocus::FileTree => {
                 if let Some(path) = state.tree_activate() {
                     open_file(state, path)?;
+                } else {
+                    // dir expanded/collapsed, stay in tree
                 }
             }
             PanelFocus::FunctionList => {
-                // Jump source view to selected function
                 state.sync_source_scroll();
                 state.focus = PanelFocus::SourceView;
             }
             PanelFocus::SourceView => {}
         },
 
-        // / — search
+        // r — reload current file
+        KeyCode::Char('r') => {
+            let path = state.file_path.clone();
+            open_file(state, path)?;
+            state.status_msg = "reloaded".to_string();
+        }
+
+        // / — search functions
         KeyCode::Char('/') => {
             state.mode = AppMode::Search;
             state.search_query.clear();

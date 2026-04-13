@@ -84,15 +84,31 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
         let mut row1 = vec![
             Span::styled(arrow, Style::default()
                 .fg(if is_sel { tn::SELECTED_FG } else { tn::FG_DARK }).bg(bg)),
-            // PRIMARY: function name
-            Span::styled(
-                take_w(&fn_name, name_w),
-                Style::default()
-                    .fg(if is_sel { tn::SELECTED_FG } else { tn::NAME })
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
         ];
+        // PRIMARY: function name, with search match highlighted
+        let name_fg = if is_sel { tn::SELECTED_FG } else { tn::NAME };
+        let name_trunc = take_w(&fn_name, name_w);
+        if !state.search_query.is_empty() && !is_sel {
+            let q = &state.search_query.to_lowercase();
+            let name_lower = name_trunc.to_lowercase();
+            if let Some(pos) = name_lower.find(q.as_str()) {
+                let before = &name_trunc[..pos];
+                let matched = &name_trunc[pos..pos + q.len()];
+                let after = &name_trunc[pos + q.len()..];
+                row1.push(Span::styled(before.to_string(),
+                    Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
+                row1.push(Span::styled(matched.to_string(),
+                    Style::default().fg(tn::STRING).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
+                row1.push(Span::styled(after.to_string(),
+                    Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
+            } else {
+                row1.push(Span::styled(name_trunc,
+                    Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
+            }
+        } else {
+            row1.push(Span::styled(name_trunc,
+                Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
+        }
         if !ret_str.is_empty() {
             row1.push(Span::styled(" ", Style::default().bg(bg)));
             // SECONDARY: return type

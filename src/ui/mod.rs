@@ -69,22 +69,36 @@ fn render_statusbar(frame: &mut Frame, state: &AppState, area: Rect) {
         PanelFocus::SourceView   => "src",
     };
 
+    // File name (just the stem, not full path)
+    let fname = state.file_path.file_name()
+        .and_then(|n| n.to_str()).unwrap_or("?");
+
+    // Source position as percentage
+    let total_lines = state.source_lines.len();
+    let pct = if total_lines > 0 {
+        ((state.source_scroll + 1) * 100 / total_lines).min(100)
+    } else { 0 };
+
     let left = match &state.mode {
         AppMode::Search => format!("  /{}█", state.search_query),
         AppMode::Normal => {
             let total = state.visible_fns().len();
             let sel = if total > 0 { state.fn_selected + 1 } else { 0 };
             let fn_part = if total > 0 { format!("  {}/{}", sel, total) } else { String::new() };
-            format!("  codepeek  [{}]{}  L{}",
-                panel, fn_part,
-                state.source_scroll + 1)
+            format!("  {}  [{}]{}  L{} {}%",
+                fname, panel, fn_part,
+                state.source_scroll + 1, pct)
         }
     };
 
     let right = if !state.status_msg.is_empty() {
         format!("  {}  ", state.status_msg)
     } else {
-        "  j/k nav · Tab switch panels · / search · q quit  ".to_string()
+        match state.focus {
+            PanelFocus::FileTree     => "  j/k·Enter open · h/l panels · q quit  ".to_string(),
+            PanelFocus::FunctionList => "  j/k·l jump·src · /search · n/N next · h back · q quit  ".to_string(),
+            PanelFocus::SourceView   => "  j/k·d/u scroll · n/N fn · r reload · h back · q quit  ".to_string(),
+        }
     };
 
     let w = area.width as usize;

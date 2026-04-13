@@ -64,7 +64,7 @@ pub fn render_source_view(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // ── Gutter — ghost level except fn-start marker ───────────
             let (gutter_str, gutter_color) = if is_start {
-                (format!("{:>w$}▶ ", line_no, w = gutter_w - 1), tn::NAME)
+                (format!("{:>w$}▶ ", line_no, w = gutter_w), tn::NAME)
             } else if in_fn {
                 (format!("{:>w$}  ", line_no, w = gutter_w), tn::FG_DARK) // slightly brighter inside fn
             } else {
