@@ -1,65 +1,78 @@
+pub mod file_tree;
 pub mod function_list;
-pub mod detail_view;
+pub mod highlight;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
     Frame,
 };
 
-use crate::model::{AppMode, AppState};
+use crate::model::{AppMode, AppState, PanelFocus};
+use file_tree::render_file_tree;
 use function_list::render_function_list;
+use highlight::tn;
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let size = frame.area();
 
-    // Split vertically: main content + status bar
-    let chunks = Layout::default()
+    // Outer vertical split: content | statusbar
+    let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(size);
 
-    let main_area = chunks[0];
-    let status_area = chunks[1];
+    let content_area = rows[0];
+    let status_area = rows[1];
 
-    render_function_list(frame, state, main_area);
+    // Horizontal split: filetree (28 cols) | functions (rest)
+    let tree_width = 28u16.min(size.width / 4);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(tree_width),
+            Constraint::Min(30),
+        ])
+        .split(content_area);
+
+    render_file_tree(frame, state, cols[0]);
+    render_function_list(frame, state, cols[1]);
     render_statusbar(frame, state, status_area);
 }
 
 fn render_statusbar(frame: &mut Frame, state: &AppState, area: Rect) {
-    let file_name = state
-        .file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    let total = state.visible_functions().len();
-    let selected = if total > 0 { state.selected + 1 } else { 0 };
+    let total = state.visible_fns().len();
+    let sel = if total > 0 { state.fn_selected + 1 } else { 0 };
 
     let left = match &state.mode {
-        AppMode::Search => format!("  Search: {}█", state.search_query),
-        AppMode::Normal => format!("  codepeek · {}  [{}/{}]", file_name, selected, total),
+        AppMode::Search => format!("  / {}█", state.search_query),
+        AppMode::Normal => {
+            let panel = match state.focus {
+                PanelFocus::FileTree     => "files",
+                PanelFocus::FunctionList => "fns",
+            };
+            format!("  codepeek  [{}]  {}/{}", panel, sel, total)
+        }
     };
 
-    let right = if state.status_msg.is_empty() {
-        "  [j/k] nav  [Enter] expand  [/] search  [q] quit  ".to_string()
-    } else {
+    let right = if !state.status_msg.is_empty() {
         format!("  {}  ", state.status_msg)
+    } else {
+        "  j/k nav · Enter expand · / search · Tab switch · q quit  ".to_string()
     };
 
-    let width = area.width as usize;
-    let padding = width.saturating_sub(left.len() + right.len());
-    let text = format!("{}{}{}", left, " ".repeat(padding), right);
+    let w = area.width as usize;
+    let pad = w.saturating_sub(left.chars().count() + right.chars().count());
+    let full = format!("{}{}{}", left, " ".repeat(pad), right);
 
     let bar = Paragraph::new(Line::from(vec![Span::styled(
-        text,
+        full,
         Style::default()
-            .bg(Color::DarkGray)
-            .fg(Color::White)
+            .fg(tn::FG)
+            .bg(tn::BG_DIM)
             .add_modifier(Modifier::BOLD),
     )]));
-
     frame.render_widget(bar, area);
 }

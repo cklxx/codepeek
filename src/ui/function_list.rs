@@ -1,14 +1,19 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
 
-use crate::model::AppState;
+use crate::model::{AppState, Language, PanelFocus};
+use super::highlight::{highlight_line, tn};
 
 pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
+    let focused = state.focus == PanelFocus::FunctionList;
+    let border_color = if focused { tn::BORDER_FOCUS } else { tn::BORDER_IDLE };
+    let lang = Language::from_path(&state.file_path);
+
     let file_name = state
         .file_path
         .file_name()
@@ -16,216 +21,233 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
         .unwrap_or("?");
 
     let block = Block::default()
-        .title(format!(" codepeek · {} ", file_name))
+        .title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(file_name, Style::default().fg(tn::FUNC).add_modifier(Modifier::BOLD)),
+            Span::styled(" — functions ", Style::default().fg(tn::FG_DIM)),
+        ]))
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
+        .border_style(Style::default().fg(border_color));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let visible = state.visible_functions();
+    let visible = state.visible_fns();
     if visible.is_empty() {
         let msg = if state.search_query.is_empty() {
             "No functions found.".to_string()
         } else {
-            format!("No functions matching '{}'.", state.search_query)
+            format!("  No match for '{}'", state.search_query)
         };
-        let p = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
+        let p = Paragraph::new(msg)
+            .style(Style::default().fg(tn::FG_DIM).bg(tn::BG));
         frame.render_widget(p, inner);
         return;
     }
 
-    // Build all lines, then scroll
+    // Build all display lines
     let mut all_lines: Vec<Line> = Vec::new();
-    let mut line_to_fn: Vec<usize> = Vec::new(); // maps display line → fn index
+    // Track which visible-fn-index each display line belongs to (for scroll)
+    let mut line_fn_idx: Vec<usize> = Vec::new();
 
-    for (vis_idx, func) in visible.iter().enumerate() {
-        let is_selected = vis_idx == state.selected;
+    for (vi, func) in visible.iter().enumerate() {
+        let is_sel = vi == state.fn_selected;
+        let bg = if is_sel { tn::BG_HL } else { tn::BG };
 
-        // ── Header row ──────────────────────────────────────────────
+        // ── Arrow + signature ──────────────────────────────────────────
         let arrow = if func.is_expanded { "▾" } else { "▸" };
 
-        let callers_badge = if !func.callers.is_empty() {
-            format!(" [{} caller{}]", func.callers.len(), if func.callers.len() == 1 { "" } else { "s" })
-        } else {
-            String::new()
-        };
+        // Syntax-highlight the signature
+        let sig_spans = highlight_signature(&func.signature, &lang);
 
-        let line_info = format!(
-            "  L{}-{}",
-            func.line_range.0, func.line_range.1
-        );
-
-        let header_style = if is_selected {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-
-        let bg = if is_selected { Color::DarkGray } else { Color::Reset };
-
-        let header = Line::from(vec![
-            Span::styled(format!(" {} ", arrow), Style::default().fg(Color::Cyan).bg(bg)),
-            Span::styled(func.signature.clone(), header_style.bg(bg)),
-            Span::styled(callers_badge, Style::default().fg(Color::Green).bg(bg)),
-            Span::styled(line_info, Style::default().fg(Color::DarkGray).bg(bg)),
-        ]);
-
-        all_lines.push(header);
-        line_to_fn.push(vis_idx);
-
-        // ── Summary row ─────────────────────────────────────────────
-        if !func.summary.is_empty() {
-            let summary_style = if is_selected {
-                Style::default().fg(Color::Gray).bg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let summary = Line::from(vec![
-                Span::raw("   "),
-                Span::styled(
-                    format!("\"{}\"", truncate(&func.summary, inner.width as usize - 6)),
-                    summary_style,
-                ),
-            ]);
-            all_lines.push(summary);
-            line_to_fn.push(vis_idx);
+        let mut header_spans = vec![
+            Span::styled(
+                format!(" {} ", arrow),
+                Style::default()
+                    .fg(if is_sel { tn::SELECTED_FG } else { tn::FG_DIM })
+                    .bg(bg),
+            ),
+        ];
+        for sp in &sig_spans {
+            header_spans.push(Span::styled(
+                sp.text.clone(),
+                Style::default().fg(sp.color).bg(bg)
+                    .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() }),
+            ));
         }
 
-        // ── Expanded body ────────────────────────────────────────────
-        if func.is_expanded {
-            // Core logic box
+        // Caller badge
+        if !func.callers.is_empty() {
+            header_spans.push(Span::styled(
+                format!("  {} caller{}", func.callers.len(), if func.callers.len() == 1 { "" } else { "s" }),
+                Style::default().fg(tn::BADGE_GREEN).bg(bg),
+            ));
+        }
+
+        // Line range (right-aligned stub — full right-align is complex in ratatui inline)
+        let w = inner.width as usize;
+        let lr = format!(" L{}-{} ", func.line_range.0, func.line_range.1);
+        if w > 20 {
+            header_spans.push(Span::styled(lr, Style::default().fg(tn::FG_DARK).bg(bg)));
+        }
+
+        all_lines.push(Line::from(header_spans));
+        line_fn_idx.push(vi);
+
+        // ── Summary ────────────────────────────────────────────────────
+        if !func.summary.is_empty() {
+            let summary_text = truncate_str(&func.summary, inner.width as usize - 4);
             all_lines.push(Line::from(vec![
-                Span::styled("   ┌─ core logic ", Style::default().fg(Color::Blue)),
+                Span::styled("     ", Style::default().bg(bg)),
                 Span::styled(
-                    "─".repeat((inner.width as usize).saturating_sub(18)),
-                    Style::default().fg(Color::Blue),
+                    format!("\"{}\"", summary_text),
+                    Style::default()
+                        .fg(tn::COMMENT)
+                        .bg(bg)
+                        .add_modifier(Modifier::ITALIC),
                 ),
-                Span::styled("┐", Style::default().fg(Color::Blue)),
             ]));
-            line_to_fn.push(vis_idx);
+            line_fn_idx.push(vi);
+        }
+
+        // ── Expanded body ──────────────────────────────────────────────
+        if func.is_expanded {
+            let code_width = (inner.width as usize).saturating_sub(8);
+
+            // Top border of code block
+            all_lines.push(Line::from(vec![
+                Span::styled("    ", Style::default().bg(tn::BG_DIM)),
+                Span::styled(
+                    format!("╭─ core ─{}╮", "─".repeat(code_width.saturating_sub(10))),
+                    Style::default().fg(tn::BORDER_IDLE).bg(tn::BG_DIM),
+                ),
+            ]));
+            line_fn_idx.push(vi);
 
             if func.core_lines.is_empty() {
                 all_lines.push(Line::from(vec![
-                    Span::styled("   │ ", Style::default().fg(Color::Blue)),
-                    Span::styled("(empty body)", Style::default().fg(Color::DarkGray)),
+                    Span::styled("    │ ", Style::default().fg(tn::BORDER_IDLE).bg(tn::BG_DIM)),
+                    Span::styled("(empty)", Style::default().fg(tn::FG_DIM).bg(tn::BG_DIM)),
                 ]));
-                line_to_fn.push(vis_idx);
+                line_fn_idx.push(vi);
             } else {
                 for code_line in &func.core_lines {
-                    let display = truncate(code_line, inner.width as usize - 8);
-                    all_lines.push(Line::from(vec![
-                        Span::styled("   │ ", Style::default().fg(Color::Blue)),
-                        Span::styled(display, Style::default().fg(Color::White)),
-                    ]));
-                    line_to_fn.push(vis_idx);
+                    let is_ellipsis = code_line.trim() == "...";
+                    if is_ellipsis {
+                        all_lines.push(Line::from(vec![
+                            Span::styled("    │ ", Style::default().fg(tn::BORDER_IDLE).bg(tn::BG_DIM)),
+                            Span::styled("  ···", Style::default().fg(tn::FG_DARK).bg(tn::BG_DIM)),
+                        ]));
+                    } else {
+                        let mut spans = vec![
+                            Span::styled("    │ ", Style::default().fg(tn::BORDER_IDLE).bg(tn::BG_DIM)),
+                        ];
+                        let hl = highlight_line(code_line, &lang);
+                        let total_chars: usize = hl.iter().map(|s| s.text.chars().count()).sum();
+                        let mut written = 0usize;
+                        for hs in &hl {
+                            let remaining = code_width.saturating_sub(written);
+                            if remaining == 0 { break; }
+                            let text = truncate_str(&hs.text, remaining);
+                            written += text.chars().count();
+                            spans.push(Span::styled(text, Style::default().fg(hs.color).bg(tn::BG_DIM)));
+                        }
+                        if total_chars == 0 {
+                            spans.push(Span::raw(""));
+                        }
+                        all_lines.push(Line::from(spans));
+                    }
+                    line_fn_idx.push(vi);
                 }
             }
 
+            // Bottom border
             all_lines.push(Line::from(vec![
-                Span::styled("   └", Style::default().fg(Color::Blue)),
+                Span::styled("    ", Style::default().bg(tn::BG_DIM)),
                 Span::styled(
-                    "─".repeat((inner.width as usize).saturating_sub(5)),
-                    Style::default().fg(Color::Blue),
+                    format!("╰{}╯", "─".repeat(code_width.saturating_sub(2))),
+                    Style::default().fg(tn::BORDER_IDLE).bg(tn::BG_DIM),
                 ),
-                Span::styled("┘", Style::default().fg(Color::Blue)),
             ]));
-            line_to_fn.push(vis_idx);
+            line_fn_idx.push(vi);
 
-            // Callees
-            if !func.callees.is_empty() {
-                let callees_str = func.callees.join(", ");
-                all_lines.push(Line::from(vec![
-                    Span::styled("   calls → ", Style::default().fg(Color::Magenta)),
-                    Span::styled(
-                        truncate(&callees_str, inner.width as usize - 14),
-                        Style::default().fg(Color::White),
-                    ),
-                ]));
-                line_to_fn.push(vis_idx);
+            // Call graph row
+            if !func.callees.is_empty() || !func.callers.is_empty() {
+                let mut call_spans = vec![Span::styled("    ", Style::default().bg(bg))];
+                if !func.callees.is_empty() {
+                    call_spans.push(Span::styled("calls ", Style::default().fg(tn::FG_DIM).bg(bg)));
+                    call_spans.push(Span::styled("→ ", Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
+                    let names = truncate_str(&func.callees.join(", "), inner.width as usize / 2 - 4);
+                    call_spans.push(Span::styled(names, Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
+                    call_spans.push(Span::styled("    ", Style::default().bg(bg)));
+                }
+                if !func.callers.is_empty() {
+                    call_spans.push(Span::styled("← ", Style::default().fg(tn::CALLER_COLOR).bg(bg)));
+                    call_spans.push(Span::styled("called by ", Style::default().fg(tn::FG_DIM).bg(bg)));
+                    let names = truncate_str(&func.callers.join(", "), inner.width as usize / 2 - 4);
+                    call_spans.push(Span::styled(names, Style::default().fg(tn::CALLER_COLOR).bg(bg)));
+                }
+                all_lines.push(Line::from(call_spans));
+                line_fn_idx.push(vi);
             }
 
-            // Callers
-            if !func.callers.is_empty() {
-                let callers_str = func.callers.join(", ");
-                all_lines.push(Line::from(vec![
-                    Span::styled("   called by ← ", Style::default().fg(Color::Green)),
-                    Span::styled(
-                        truncate(&callers_str, inner.width as usize - 18),
-                        Style::default().fg(Color::White),
-                    ),
-                ]));
-                line_to_fn.push(vis_idx);
-            }
-
-            // Separator
+            // Spacer after expanded fn
             all_lines.push(Line::from(Span::raw("")));
-            line_to_fn.push(vis_idx);
+            line_fn_idx.push(vi);
         } else {
-            // Compact callees/callers for collapsed view
-            let mut call_info = Vec::new();
-            if !func.callees.is_empty() {
-                call_info.push(format!("→ {}", func.callees.join(", ")));
+            // Collapsed: show inline call hints
+            let mut hints: Vec<Span> = vec![Span::styled("   ", Style::default().bg(bg))];
+            let has_hint = !func.callees.is_empty() || !func.callers.is_empty();
+            if has_hint {
+                if !func.callees.is_empty() {
+                    hints.push(Span::styled("→ ", Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
+                    let n = truncate_str(&func.callees.join(", "), 40);
+                    hints.push(Span::styled(n, Style::default().fg(tn::FG_DARK).bg(bg)));
+                    hints.push(Span::styled("   ", Style::default().bg(bg)));
+                }
+                if !func.callers.is_empty() {
+                    hints.push(Span::styled("← ", Style::default().fg(tn::CALLER_COLOR).bg(bg)));
+                    let n = truncate_str(&func.callers.join(", "), 40);
+                    hints.push(Span::styled(n, Style::default().fg(tn::FG_DARK).bg(bg)));
+                }
+                all_lines.push(Line::from(hints));
+                line_fn_idx.push(vi);
             }
-            if !func.callers.is_empty() {
-                call_info.push(format!("← {}", func.callers.join(", ")));
-            }
-            if !call_info.is_empty() {
-                let text = call_info.join("  ");
-                all_lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(
-                        truncate(&text, inner.width as usize - 6),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-                line_to_fn.push(vis_idx);
-            }
-
-            // Blank line between functions
-            all_lines.push(Line::from(Span::raw("")));
-            line_to_fn.push(vis_idx);
+            // Separator
+            all_lines.push(Line::from(Span::styled(
+                format!("   {}", "─".repeat((inner.width as usize).saturating_sub(6))),
+                Style::default().fg(tn::BG_DIM),
+            )));
+            line_fn_idx.push(vi);
         }
     }
 
-    // Auto-scroll: find first line for selected function
-    let selected_start = line_to_fn
-        .iter()
-        .position(|&fn_idx| fn_idx == state.selected)
-        .unwrap_or(0);
+    // Scroll: keep selected function's first line in view
+    let sel_start = line_fn_idx.iter().position(|&i| i == state.fn_selected).unwrap_or(0);
+    let h = inner.height as usize;
+    let scroll = if sel_start < h / 2 { 0 } else { sel_start.saturating_sub(h / 3) };
 
-    let scroll = state.scroll_offset;
-    let visible_height = inner.height as usize;
+    let display: Vec<Line> = all_lines.into_iter().skip(scroll).take(h).collect();
 
-    // Calculate scroll offset to keep selected in view
-    let scroll_start = if selected_start < scroll {
-        selected_start
-    } else if selected_start >= scroll + visible_height {
-        selected_start.saturating_sub(visible_height / 2)
-    } else {
-        scroll
-    };
-
-    let display_lines: Vec<Line> = all_lines
-        .into_iter()
-        .skip(scroll_start)
-        .take(visible_height)
-        .collect();
-
-    let content = Paragraph::new(display_lines);
-    frame.render_widget(content, inner);
+    let p = Paragraph::new(display).style(Style::default().bg(tn::BG));
+    frame.render_widget(p, inner);
 }
 
-fn truncate(s: &str, max: usize) -> String {
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn truncate_str(s: &str, max: usize) -> String {
     if max < 4 {
         return s.chars().take(max).collect();
     }
     if s.chars().count() > max {
-        format!("{}...", s.chars().take(max - 3).collect::<String>())
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
     } else {
         s.to_string()
     }
+}
+
+/// Highlight just the signature line — keywords purple, fn name blue, types cyan.
+fn highlight_signature(sig: &str, lang: &Language) -> Vec<super::highlight::Span> {
+    highlight_line(sig, lang)
 }

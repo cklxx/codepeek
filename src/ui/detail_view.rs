@@ -1,2 +1,1 @@
-// Placeholder for future split-pane detail view
-// Currently the detail is inlined in function_list.rs (expanded mode)
+// Reserved for future split-detail pane (show full function source side by side)
