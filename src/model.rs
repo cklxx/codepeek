@@ -152,13 +152,37 @@ fn toggle_node_by_path(nodes: &mut Vec<FileNode>, target: &PathBuf) {
     }
 }
 
-fn build_tree(root: &PathBuf) -> Vec<FileNode> {
-    let dir = if root.is_file() {
-        root.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| root.clone())
+/// Walk up from `start` to find the project root (Cargo.toml, .git, package.json, etc.).
+/// Falls back to the directory itself if no marker found.
+pub fn find_project_root(start: &PathBuf) -> PathBuf {
+    let markers = [
+        "Cargo.toml", "Cargo.lock",
+        "package.json",
+        "pyproject.toml", "setup.py", "setup.cfg",
+        "go.mod",
+        ".git",
+    ];
+    let dir = if start.is_file() {
+        start.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| start.clone())
     } else {
-        root.clone()
+        start.clone()
     };
-    FileNode::load(dir, 0).map(|n| vec![n]).unwrap_or_default()
+
+    let mut current = dir.clone();
+    loop {
+        if markers.iter().any(|m| current.join(m).exists()) {
+            return current;
+        }
+        match current.parent() {
+            Some(p) if p != current => current = p.to_path_buf(),
+            _ => return dir,
+        }
+    }
+}
+
+fn build_tree(root: &PathBuf) -> Vec<FileNode> {
+    let project_root = find_project_root(root);
+    FileNode::load(project_root, 0).map(|n| vec![n]).unwrap_or_default()
 }
 
 // ─── Panel focus ─────────────────────────────────────────────────────────────

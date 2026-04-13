@@ -1,11 +1,15 @@
-/// Function list panel.
+/// Function list — visual hierarchy from eye-tracking research:
 ///
-/// Visual hierarchy (based on eye-tracking research):
-///   PRIMARY   — function name: bold, bright blue, leftmost position
-///   SECONDARY — return type: cyan, right of name
-///   TERTIARY  — `pub fn` keywords + params: muted purple, second row
-///   SUPPORT   — summary (docstring): italic, comment color
-///   PERIPHERAL — caller badge, line number: low-contrast, right-aligned
+///   Row 1  [·/▶] fn_name  → RetType            ↑callers L123
+///   Row 2        pub fn (params)  "summary italic"
+///   Row 3  (selected only) → callees  ← callers
+///
+/// Attention levels:
+///   PRIMARY   fn_name: bold bright blue — first fixation point
+///   SECONDARY RetType: cyan — second glance
+///   TERTIARY  pub fn params: very muted — peripheral
+///   SUPPORT   summary: italic dim — read only if needed
+///   PERIPHERAL badges ↑↓ line-num: barely visible right side
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -14,203 +18,145 @@ use ratatui::{
     Frame,
 };
 
-use crate::model::{AppState, Language, PanelFocus};
+use crate::model::{AppState, PanelFocus};
 use super::highlight::tn;
 
 pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let focused = state.focus == PanelFocus::FunctionList;
-    let border_color = if focused { tn::BORDER_FOCUS } else { tn::BORDER_IDLE };
-
-    let count = state.visible_fns().len();
-    let total = state.functions.len();
-    let count_str = if state.search_query.is_empty() {
-        format!(" {} fns ", total)
-    } else {
-        format!(" {}/{} ", count, total)
-    };
 
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(" functions ", Style::default().fg(tn::FG_DIM)),
-            Span::styled(count_str, Style::default().fg(tn::FG_DARK)),
+            Span::styled(
+                format!(" {} fns ", state.functions.len()),
+                Style::default().fg(tn::FG_DIM),
+            ),
         ]))
         .borders(Borders::ALL)
         .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
-        .border_style(Style::default().fg(border_color));
+        .border_style(Style::default().fg(if focused { tn::BORDER_FOCUS } else { tn::BORDER_IDLE }));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let visible = state.visible_fns();
-
     if visible.is_empty() {
-        let msg = if state.search_query.is_empty() {
-            " no functions found — view source on the right".to_string()
-        } else {
-            format!(" no match for '{}'", state.search_query)
-        };
-        let p = Paragraph::new(msg).style(Style::default().fg(tn::FG_DARK).bg(tn::BG));
-        frame.render_widget(p, inner);
+        frame.render_widget(
+            Paragraph::new(if state.search_query.is_empty() {
+                " no functions — see source →".to_string()
+            } else {
+                format!(" no match '{}'", state.search_query)
+            })
+            .style(Style::default().fg(tn::FG_DARK).bg(tn::BG)),
+            inner,
+        );
         return;
     }
 
     let w = inner.width as usize;
     let h = inner.height as usize;
 
-    // Build all display lines
     let mut all_lines: Vec<Line> = Vec::new();
-    let mut line_fn_idx: Vec<usize> = Vec::new(); // which fn each display line belongs to
+    let mut line_fn_idx: Vec<usize> = Vec::new();
 
     for (vi, func) in visible.iter().enumerate() {
         let is_sel = vi == state.fn_selected;
-        let bg = if is_sel { tn::BG_HL } else { tn::BG };
+        let bg = if is_sel { tn::BG_SEL } else { tn::BG };
 
-        // ── Decompose signature ────────────────────────────────────────────
-        let (vis_kw, fn_name, params, ret_type) = decompose_sig(&func.signature);
-        let lang = Language::from_path(&state.file_path);
-        let _ = lang;
+        let (vis_kw, fn_name, params, ret) = decompose_sig(&func.signature);
 
-        // ── ROW 1: [▸] FnName  → RetType   ↑N  L123 ─────────────────────
-        let arrow = if is_sel { "▶" } else { "·" };
-        let arrow_color = if is_sel { tn::SELECTED_FG } else { tn::FG_DARK };
-
-        let caller_badge = if !func.callers.is_empty() {
-            format!(" ↑{}", func.callers.len())
-        } else {
-            String::new()
+        // ── ROW 1: [▶/·] NAME → RetType           ↑N L123 ─────────────
+        let arrow = if is_sel { "▶ " } else { "  " };
+        let name_w = (w / 2).min(fn_name.chars().count() + 2);
+        let ret_str = if ret.is_empty() { String::new() } else { format!("→ {}", ret) };
+        let badge_str = {
+            let mut b = String::new();
+            if !func.callers.is_empty() { b.push_str(&format!(" ↑{}", func.callers.len())); }
+            if !func.callees.is_empty() { b.push_str(&format!(" ↓{}", func.callees.len())); }
+            b.push_str(&format!(" L{}", func.line_range.0));
+            b
         };
-        let callee_badge = if !func.callees.is_empty() {
-            format!(" ↓{}", func.callees.len())
-        } else {
-            String::new()
-        };
-        let line_badge = format!(" L{}", func.line_range.0);
 
-        // Right-side badges width
-        let badges = format!("{}{}{}", caller_badge, callee_badge, line_badge);
-        let name_ret_max = w.saturating_sub(3 + badges.len() + 2);
-
-        let name_display = truncate(&fn_name, name_ret_max.saturating_sub(ret_type.len() + 4));
-        let ret_display = if !ret_type.is_empty() {
-            truncate(&ret_type, 20)
-        } else {
-            String::new()
-        };
+        // Compute padding to push badges to the right
+        let used = 2 + fn_name.chars().count().min(name_w)
+            + if ret_str.is_empty() { 0 } else { 1 + ret_str.chars().count() };
+        let pad = w.saturating_sub(used + badge_str.chars().count() + 1);
 
         let mut row1 = vec![
-            Span::styled(format!(" {} ", arrow), Style::default().fg(arrow_color).bg(bg)),
-            // PRIMARY: function name — bold, bright, leftmost
+            Span::styled(arrow, Style::default()
+                .fg(if is_sel { tn::SELECTED_FG } else { tn::FG_DARK }).bg(bg)),
+            // PRIMARY: function name
             Span::styled(
-                name_display,
+                take_w(&fn_name, name_w),
                 Style::default()
-                    .fg(if is_sel { tn::SELECTED_FG } else { tn::FUNC })
+                    .fg(if is_sel { tn::SELECTED_FG } else { tn::NAME })
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-
-        if !ret_display.is_empty() {
-            row1.push(Span::styled(" → ", Style::default().fg(tn::FG_DARK).bg(bg)));
+        if !ret_str.is_empty() {
+            row1.push(Span::styled(" ", Style::default().bg(bg)));
             // SECONDARY: return type
             row1.push(Span::styled(
-                ret_display.clone(),
+                take_w(&ret_str, w.saturating_sub(used + pad + badge_str.len())),
                 Style::default().fg(tn::TYPE_).bg(bg),
             ));
         }
-
-        // Spacer + peripheral badges (right-aligned approximation)
-        let ret_display_len = ret_display.len();
-        let used: usize = 3 + fn_name.len().min(name_ret_max.saturating_sub(ret_type.len() + 4))
-            + if !ret_type.is_empty() { 3 + ret_display_len } else { 0 };
-        let pad = w.saturating_sub(used + badges.len() + 1);
-        row1.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
-        // caller count — green peripheral
-        if !caller_badge.is_empty() {
-            row1.push(Span::styled(
-                caller_badge.clone(),
-                Style::default().fg(tn::CALLER_COLOR).bg(bg),
-            ));
-        }
-        // callee count — orange peripheral
-        if !callee_badge.is_empty() {
-            row1.push(Span::styled(
-                callee_badge.clone(),
-                Style::default().fg(tn::CALLEE_COLOR).bg(bg),
-            ));
-        }
-        // Line number — very muted
-        row1.push(Span::styled(
-            line_badge,
-            Style::default().fg(tn::FG_DARK).bg(bg),
-        ));
+        // Filler + peripheral badges
+        row1.push(Span::styled(" ".repeat(pad.min(w)), Style::default().bg(bg)));
+        row1.push(Span::styled(badge_str, Style::default().fg(tn::FG_DARK).bg(bg)));
 
         all_lines.push(Line::from(row1));
         line_fn_idx.push(vi);
 
-        // ── ROW 2: [  pub fn (params)   "summary"] ────────────────────────
-        let kw_part = if !vis_kw.is_empty() {
-            format!("{} ", vis_kw)
-        } else {
-            String::new()
-        };
-        let params_part = if !params.is_empty() {
-            format!("({})", truncate(&params, 30))
-        } else {
-            String::new()
-        };
-        let sig_part = format!("   {}{}{}", kw_part, "fn ", params_part);
-        let summary_part = if !func.summary.is_empty() {
-            let max_s = w.saturating_sub(sig_part.chars().count() + 4);
-            format!("  \"{}\"", truncate(&func.summary, max_s))
-        } else {
-            String::new()
-        };
+        // ── ROW 2: tertiary sig + italic summary ──────────────────────
+        let kw_part = if vis_kw.is_empty() { "fn ".to_string() }
+                      else { format!("{} fn ", vis_kw) };
+        let param_part = if params.is_empty() { String::new() }
+                         else { format!("({})", take_w(&params, 28)) };
+        let sig_part = take_w(&format!("  {}{}", kw_part, param_part), w / 2);
 
-        let row2 = Line::from(vec![
-            // TERTIARY: keywords and params — muted, processed peripherally
-            Span::styled(
-                sig_part,
-                Style::default().fg(tn::FG_DARK).bg(bg),
-            ),
-            // SUPPORT: summary — italic, comment-colored
+        let summary_max = w.saturating_sub(sig_part.chars().count() + 3);
+        let summary_part = if func.summary.is_empty() { String::new() }
+                           else { format!("  \"{}\"", take_w(&func.summary, summary_max)) };
+
+        all_lines.push(Line::from(vec![
+            // TERTIARY: keywords and params — very muted
+            Span::styled(sig_part, Style::default().fg(tn::FG_DARK).bg(bg)),
+            // SUPPORT: summary — italic, barely visible
             Span::styled(
                 summary_part,
-                Style::default()
-                    .fg(tn::COMMENT)
-                    .bg(bg)
-                    .add_modifier(Modifier::ITALIC),
+                Style::default().fg(tn::FG_DIM).bg(bg).add_modifier(Modifier::ITALIC),
             ),
-        ]);
-        all_lines.push(row2);
+        ]));
         line_fn_idx.push(vi);
 
-        // ── ROW 3 (selected only): call graph ─────────────────────────────
+        // ── ROW 3 (selected): call graph ──────────────────────────────
         if is_sel && (!func.callees.is_empty() || !func.callers.is_empty()) {
-            let mut row3 = vec![Span::styled("   ", Style::default().bg(bg))];
+            let mut r3 = vec![Span::styled("  ", Style::default().bg(bg))];
             if !func.callees.is_empty() {
-                row3.push(Span::styled("→ ", Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
-                row3.push(Span::styled(
-                    truncate(&func.callees.join("  "), w / 2 - 4),
-                    Style::default().fg(tn::FG_DIM).bg(bg),
+                r3.push(Span::styled("→ ", Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
+                r3.push(Span::styled(
+                    take_w(&func.callees.join("  "), w.saturating_sub(4) / 2),
+                    Style::default().fg(tn::FG_MED).bg(bg),
                 ));
-                row3.push(Span::styled("   ", Style::default().bg(bg)));
+                r3.push(Span::styled("   ", Style::default().bg(bg)));
             }
             if !func.callers.is_empty() {
-                row3.push(Span::styled("← ", Style::default().fg(tn::CALLER_COLOR).bg(bg)));
-                row3.push(Span::styled(
-                    truncate(&func.callers.join("  "), w / 2 - 4),
-                    Style::default().fg(tn::FG_DIM).bg(bg),
+                r3.push(Span::styled("← ", Style::default().fg(tn::CALLER_COLOR).bg(bg)));
+                r3.push(Span::styled(
+                    take_w(&func.callers.join("  "), w.saturating_sub(4) / 2),
+                    Style::default().fg(tn::FG_MED).bg(bg),
                 ));
             }
-            all_lines.push(Line::from(row3));
+            all_lines.push(Line::from(r3));
             line_fn_idx.push(vi);
         }
 
-        // ── Divider ────────────────────────────────────────────────────────
+        // ── Thin divider ──────────────────────────────────────────────
         if vi + 1 < visible.len() {
             all_lines.push(Line::from(Span::styled(
-                " ".repeat(w),
-                Style::default().bg(tn::BG),
+                format!("  {}", "─".repeat(w.saturating_sub(3))),
+                Style::default().fg(tn::FG_DARK).bg(tn::BG),
             )));
             line_fn_idx.push(vi);
         }
@@ -218,44 +164,47 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Scroll to keep selected fn in view
     let sel_start = line_fn_idx.iter().position(|&i| i == state.fn_selected).unwrap_or(0);
-    let scroll = if sel_start < h / 3 {
-        0
-    } else {
-        sel_start.saturating_sub(h / 3)
-    };
+    let scroll = sel_start.saturating_sub(h / 3);
 
     let display: Vec<Line> = all_lines.into_iter().skip(scroll).take(h).collect();
-    let p = Paragraph::new(display).style(Style::default().bg(tn::BG));
-    frame.render_widget(p, inner);
+    frame.render_widget(
+        Paragraph::new(display).style(Style::default().bg(tn::BG)),
+        inner,
+    );
 }
 
-// ─── Signature decomposition ──────────────────────────────────────────────────
-// Returns (visibility_keywords, fn_name, params, return_type)
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
+fn take_w(s: &str, max: usize) -> String {
+    if max == 0 { return String::new(); }
+    if s.chars().count() <= max { return s.to_string(); }
+    format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+}
+
+/// Returns (visibility_keywords, fn_name, params_inner, return_type)
 fn decompose_sig(sig: &str) -> (String, String, String, String) {
-    // Strip leading visibility/async keywords
-    let vis_words = ["pub", "async", "unsafe", "extern", "const", "pub(crate)", "pub(super)"];
-    let mut rest = sig.trim();
-    let mut vis_parts: Vec<&str> = Vec::new();
+    let vis_kws = ["pub(crate)", "pub(super)", "pub", "async", "unsafe", "extern", "const"];
+    let lang_kws = ["fn ", "def ", "function ", "func "];
 
-    loop {
-        let mut found = false;
-        for &kw in &vis_words {
+    let mut rest = sig.trim();
+    let mut vis = Vec::new();
+
+    // Strip visibility/modifier keywords
+    'outer: loop {
+        for &kw in &vis_kws {
             if rest.starts_with(kw) {
                 let after = &rest[kw.len()..];
-                if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
-                    vis_parts.push(kw);
+                if after.is_empty() || !after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+                    vis.push(kw.trim());
                     rest = after.trim_start();
-                    found = true;
-                    break;
+                    continue 'outer;
                 }
             }
         }
-        if !found { break; }
+        break;
     }
 
-    // Strip `fn ` or `def ` or `function `
-    let lang_kws = ["fn ", "def ", "function ", "func "];
+    // Strip language keyword
     for kw in &lang_kws {
         if rest.starts_with(kw) {
             rest = &rest[kw.len()..];
@@ -263,58 +212,48 @@ fn decompose_sig(sig: &str) -> (String, String, String, String) {
         }
     }
 
-    // Extract fn name (up to `(` or `<`)
+    // Function name (up to `(` or `<`)
     let name_end = rest.find(|c: char| c == '(' || c == '<' || c == ':').unwrap_or(rest.len());
     let fn_name = rest[..name_end].trim().to_string();
     rest = &rest[name_end..];
 
-    // Skip generics <...>
+    // Skip generics
     if rest.starts_with('<') {
         let mut depth = 0usize;
-        let mut i = 0;
+        let mut consumed = 0usize;
         for ch in rest.chars() {
-            i += ch.len_utf8();
+            consumed += ch.len_utf8();
             match ch { '<' => depth += 1, '>' => { depth -= 1; if depth == 0 { break; } } _ => {} }
         }
-        rest = &rest[i..];
+        rest = &rest[consumed..];
     }
 
-    // Extract params (...)
+    // Params
     let params = if rest.starts_with('(') {
-        let close = find_matching_paren(rest);
-        let inner = &rest[1..close.saturating_sub(1)];
+        let close = find_close_paren(rest);
+        let inner = rest[1..close.saturating_sub(1)].trim().to_string();
         rest = &rest[close..];
-        // Simplify params: strip types, keep names only for display
-        inner.trim().to_string()
+        inner
     } else {
         String::new()
     };
 
-    // Return type: after `->` or `:` (Python)
-    let ret = if let Some(pos) = rest.find("->") {
-        rest[pos + 2..].trim().trim_end_matches('{').trim().to_string()
-    } else if let Some(pos) = rest.find(':') {
-        // Python return annotation
-        rest[pos + 1..].trim().to_string()
+    // Return type after `->`
+    let ret = if let Some(p) = rest.find("->") {
+        rest[p + 2..].trim().trim_end_matches('{').trim().to_string()
     } else {
         String::new()
     };
 
-    (vis_parts.join(" "), fn_name, params, ret)
+    (vis.join(" "), fn_name, params, ret)
 }
 
-fn find_matching_paren(s: &str) -> usize {
+fn find_close_paren(s: &str) -> usize {
     let mut depth = 0usize;
-    let mut i = 0;
+    let mut i = 0usize;
     for ch in s.chars() {
         i += ch.len_utf8();
         match ch { '(' => depth += 1, ')' => { depth -= 1; if depth == 0 { return i; } } _ => {} }
     }
     i
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if max < 2 { return String::new(); }
-    if s.chars().count() <= max { s.to_string() }
-    else { format!("{}…", s.chars().take(max - 1).collect::<String>()) }
 }
