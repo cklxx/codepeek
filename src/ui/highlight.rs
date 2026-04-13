@@ -52,10 +52,20 @@ pub mod tn {
     // ── Muted: comments/support — intentionally below AA (2.7-3.5:1) ─────────
     pub const COMMENT: Color = Color::Rgb(86, 95, 137);   // #565f89  2.8:1
 
+    // ── Semantic UI tokens ────────────────────────────────────────────────────
+    //
+    // OWNER (warm amber, hue ~36°) vs NAME (cool blue, hue ~221°) = 185° apart
+    // This maximum hue distance enables preattentive pop-out: struct owners
+    // are instantly distinguishable from method names without conscious effort.
+    // Warm colors visually "advance" — making the structural anchor prominent.
+    pub const OWNER: Color         = Color::Rgb(224, 175, 104); // #e0af68  8.9:1  hsl(36,66%,64%)
+    // ASYNC badge — subtle violet, neither warm nor cold
+    pub const ASYNC_TAG: Color     = Color::Rgb(157, 124, 216); // #9d7cd8  5.8:1  hsl(261,55%,67%)
+
     // ── UI chrome ─────────────────────────────────────────────────────────────
     pub const BORDER_FOCUS: Color  = Color::Rgb(122, 162, 247); // NAME blue
     pub const BORDER_IDLE: Color   = Color::Rgb(47, 52, 78);    // #2f344e
-    pub const SELECTED_FG: Color   = Color::Rgb(224, 175, 104); // #e0af68 gold
+    pub const SELECTED_FG: Color   = Color::Rgb(224, 175, 104); // #e0af68 gold same as OWNER
     pub const CALLER_COLOR: Color  = Color::Rgb(115, 218, 202); // #73daca teal
     pub const CALLEE_COLOR: Color  = Color::Rgb(255, 158, 100); // #ff9e64 orange
     pub const LINENUM: Color       = Color::Rgb(47, 52, 78);    // ghost gutter

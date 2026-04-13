@@ -20,38 +20,67 @@ pub fn parse(source: &str, path: &PathBuf) -> Result<Vec<FunctionInfo>> {
     let src = source.as_bytes();
 
     let mut functions = Vec::new();
-    collect_functions(root, &lines, src, &mut functions);
+    collect_functions(root, &lines, src, None, &mut functions);
     Ok(functions)
 }
 
-fn collect_functions(node: Node, lines: &[&str], src: &[u8], out: &mut Vec<FunctionInfo>) {
-    if node.kind() == "function_definition" {
-        if let Some(info) = extract_function(node, lines, src) {
-            out.push(info);
+fn collect_functions<'a>(
+    node: Node<'a>,
+    lines: &[&str],
+    src: &[u8],
+    class_owner: Option<&str>,
+    out: &mut Vec<FunctionInfo>,
+) {
+    match node.kind() {
+        "class_definition" => {
+            let class_name = node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+                .map(|s| s.to_string());
+
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_functions(child, lines, src, class_name.as_deref(), out);
+            }
+            return;
         }
+        "function_definition" => {
+            if let Some(mut info) = extract_function(node, lines, src) {
+                info.owner = class_owner.map(|s| s.to_string());
+                out.push(info);
+            }
+            // Don't recurse into function bodies
+            return;
+        }
+        _ => {}
     }
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_functions(child, lines, src, out);
+        collect_functions(child, lines, src, class_owner, out);
     }
 }
 
 fn extract_function(node: Node, lines: &[&str], src: &[u8]) -> Option<FunctionInfo> {
     let start = node.start_position().row;
-    let end = node.end_position().row;
+    let end   = node.end_position().row;
 
     let name = node.child_by_field_name("name")?.utf8_text(src).ok()?.to_string();
     let signature = lines.get(start).unwrap_or(&"").trim().trim_end_matches(':').to_string();
     let doc = extract_docstring(node, src);
 
-    let first_body = lines
+    let body: Vec<&str> = lines
         .get(start + 1..end)
         .unwrap_or(&[])
         .iter()
-        .find(|l| !l.trim().is_empty() && !l.trim().starts_with("\"\"\"") && !l.trim().starts_with("'''"))
-        .map(|l| l.trim().to_string());
+        .filter(|l| {
+            let t = l.trim();
+            !t.starts_with("\"\"\"") && !t.starts_with("'''")
+        })
+        .copied()
+        .collect();
 
-    Some(FunctionInfo::new(name, signature, (start + 1, end + 1), doc, first_body))
+    Some(FunctionInfo::new(name, signature, (start + 1, end + 1), doc, &body))
 }
 
 fn extract_docstring(node: Node, src: &[u8]) -> Option<String> {
@@ -71,7 +100,7 @@ fn extract_docstring(node: Node, src: &[u8]) -> Option<String> {
                         .unwrap_or("")
                         .trim()
                         .chars()
-                        .take(100)
+                        .take(120)
                         .collect();
                     return Some(cleaned);
                 }

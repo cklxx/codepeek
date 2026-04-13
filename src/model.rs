@@ -37,6 +37,12 @@ pub struct FunctionInfo {
     pub summary: String,
     pub callers: Vec<String>,
     pub callees: Vec<String>,
+    /// The struct/class/impl this function belongs to, if any.
+    pub owner: Option<String>,
+    /// True if this function takes `self`, `&self`, or `&mut self`.
+    pub is_method: bool,
+    /// True if declared with `async`.
+    pub is_async: bool,
 }
 
 impl FunctionInfo {
@@ -45,15 +51,22 @@ impl FunctionInfo {
         signature: String,
         line_range: (usize, usize),
         doc_comment: Option<String>,
-        first_body_line: Option<String>,
+        body_lines: &[&str],
     ) -> Self {
         let summary = doc_comment
-            .or(first_body_line)
+            .or_else(|| extract_smart_summary(body_lines))
             .unwrap_or_default()
             .trim()
             .chars()
-            .take(80)
+            .take(90)
             .collect();
+
+        let is_async = signature.contains("async ");
+        let is_method = signature.contains("&self")
+            || signature.contains("&mut self")
+            || signature.contains("mut self,")
+            || signature.contains("(self")
+            || signature.contains("(mut self");
 
         FunctionInfo {
             name,
@@ -62,8 +75,37 @@ impl FunctionInfo {
             summary,
             callers: vec![],
             callees: vec![],
+            owner: None,
+            is_method,
+            is_async,
         }
     }
+}
+
+/// Skip trivial boilerplate lines (let bindings, self.field = x, etc.)
+/// and return the first "meaningful" body statement as a summary hint.
+fn extract_smart_summary(body_lines: &[&str]) -> Option<String> {
+    // Skip patterns that carry no semantic signal
+    let trivial = |l: &str| -> bool {
+        let t = l.trim();
+        t.is_empty()
+            || t.starts_with("//")
+            || t.starts_with("let mut ")
+            || t.starts_with("let _ ")
+            || t == "{"
+            || t == "}"
+            || (t.starts_with("let ") && t.contains("= Self {"))
+            || (t.starts_with("let ") && t.contains("::new()"))
+            || (t.starts_with("let ") && t.contains("::default()"))
+            || (t.starts_with("let ") && t.contains("Vec::"))
+            || (t.starts_with("self.") && t.contains(" = "))
+    };
+
+    body_lines
+        .iter()
+        .skip_while(|l| trivial(l))
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
 }
 
 // ─── FileTree ────────────────────────────────────────────────────────────────

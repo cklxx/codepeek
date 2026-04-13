@@ -5,6 +5,7 @@ use tree_sitter::{Node, Parser};
 use crate::model::FunctionInfo;
 
 pub fn parse(source: &str, path: &PathBuf) -> Result<Vec<FunctionInfo>> {
+    let _ = path;
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -19,68 +20,80 @@ pub fn parse(source: &str, path: &PathBuf) -> Result<Vec<FunctionInfo>> {
     let src = source.as_bytes();
 
     let mut functions = Vec::new();
-    collect_functions(root, &lines, src, path, &mut functions);
+    collect_functions(root, &lines, src, None, &mut functions);
     Ok(functions)
 }
 
-fn collect_functions(
-    node: Node,
+/// Recurse the AST. `impl_owner` is the type name of the enclosing `impl` block, if any.
+fn collect_functions<'a>(
+    node: Node<'a>,
     lines: &[&str],
     src: &[u8],
-    path: &PathBuf,
+    impl_owner: Option<&str>,
     out: &mut Vec<FunctionInfo>,
 ) {
-    if node.kind() == "function_item" {
-        if let Some(info) = extract_function(node, lines, src, path) {
-            out.push(info);
+    match node.kind() {
+        "impl_item" => {
+            // Extract the implementing type (last type child in `impl [Trait for] Type`)
+            let type_name = node
+                .child_by_field_name("type")
+                .and_then(|n| n.utf8_text(src).ok())
+                .map(|s| simplify_type(s));
+
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_functions(child, lines, src, type_name.as_deref(), out);
+            }
+            return;
         }
+        "function_item" => {
+            if let Some(mut info) = extract_function(node, lines, src) {
+                info.owner = impl_owner.map(|s| s.to_string());
+                out.push(info);
+            }
+            // Don't recurse into function bodies to avoid nested functions polluting the list
+            return;
+        }
+        _ => {}
     }
+
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_functions(child, lines, src, path, out);
+        collect_functions(child, lines, src, impl_owner, out);
     }
 }
 
-fn extract_function(
-    node: Node,
-    lines: &[&str],
-    src: &[u8],
-    _path: &PathBuf,
-) -> Option<FunctionInfo> {
+fn extract_function(node: Node, lines: &[&str], src: &[u8]) -> Option<FunctionInfo> {
     let start = node.start_position().row;
-    let end = node.end_position().row;
+    let end   = node.end_position().row;
 
     let name = node.child_by_field_name("name")?.utf8_text(src).ok()?.to_string();
     let signature = build_signature(node, lines);
     let doc = extract_doc_comment(start, lines);
 
-    // First non-empty body line for fallback summary
-    let first_body = lines
+    // Body lines for smart summary (skip first line = fn header)
+    let body: Vec<&str> = lines
         .get(start + 1..end)
         .unwrap_or(&[])
         .iter()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string());
+        .copied()
+        .collect();
 
-    Some(FunctionInfo::new(
-        name,
-        signature,
-        (start + 1, end + 1),
-        doc,
-        first_body,
-    ))
+    Some(FunctionInfo::new(name, signature, (start + 1, end + 1), doc, &body))
 }
 
 fn build_signature(node: Node, lines: &[&str]) -> String {
     let start = node.start_position().row;
-    let end = node.end_position().row;
+    let end   = node.end_position().row;
 
-    // Collect lines until we hit the opening `{`
     let mut sig_lines = Vec::new();
     for row in start..=end {
         let line = lines.get(row).unwrap_or(&"");
+        // Stop at the opening brace of the body
         if let Some(pos) = line.find('{') {
-            sig_lines.push(line[..pos].trim_end().to_string());
+            // But don't stop at `{` inside `where` clause type bounds
+            let before = &line[..pos];
+            sig_lines.push(before.trim_end().to_string());
             break;
         } else {
             sig_lines.push(line.trim_end().to_string());
@@ -100,7 +113,7 @@ fn extract_doc_comment(fn_start: usize, lines: &[&str]) -> Option<String> {
         if l.starts_with("///") {
             doc.push(l.trim_start_matches("///").trim().to_string());
         } else if l.starts_with("#[") || l.is_empty() {
-            // skip attrs and blanks
+            // skip attributes and blank lines between doc and fn
         } else {
             break;
         }
@@ -110,5 +123,10 @@ fn extract_doc_comment(fn_start: usize, lines: &[&str]) -> Option<String> {
         return None;
     }
     doc.reverse();
-    Some(doc.join(" ").chars().take(100).collect())
+    Some(doc.join(" ").chars().take(120).collect())
+}
+
+/// Strip generic parameters from type names for display: `AppState<T>` → `AppState`
+fn simplify_type(s: &str) -> String {
+    s.find('<').map(|i| s[..i].to_string()).unwrap_or_else(|| s.to_string())
 }

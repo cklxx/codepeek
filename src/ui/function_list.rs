@@ -1,15 +1,20 @@
-/// Function list — visual hierarchy from eye-tracking research:
+/// Function list — Visual hierarchy from eye-tracking + attention research:
 ///
-///   Row 1  [·/▶] fn_name  → RetType            ↑callers L123
-///   Row 2        pub fn (params)  "summary italic"
-///   Row 3  (selected only) → callees  ← callers
+/// ─── impl OwnerType ───────────────────────────────   <- GROUP HEADER: amber anchor
+///  · name              → RetType            L123 ↑↓   <- ROW 1: name (blue) + type (cyan)
+///    async (&self, arg…)   "docstring summary"         <- ROW 2: sig muted + summary italic
+/// ─────────────────────────────────────────────────
+///  ▶ selected_name     → RetType            L89 ↑1    <- SELECTED: amber name
+///    (&mut self, x: T)   "Updates the state"
+///    → callee1  callee2      ← caller1                 <- CALL GRAPH (selected only)
 ///
-/// Attention levels:
-///   PRIMARY   fn_name: bold bright blue — first fixation point
-///   SECONDARY RetType: cyan — second glance
-///   TERTIARY  pub fn params: very muted — peripheral
-///   SUPPORT   summary: italic dim — read only if needed
-///   PERIPHERAL badges ↑↓ line-num: barely visible right side
+/// Attention levels (WCAG/APCA contrast vs #1a1b26):
+///   OWNER    #e0af68  8.9:1  warm amber   ← structural anchor, preattentive (>180° from blue)
+///   NAME     #7aa2f7  6.8:1  cool blue    ← primary identifier, first fixation
+///   TYPE_    #2ac3de  8.1:1  cyan         ← secondary, return type
+///   ASYNC    #9d7cd8  5.8:1  violet       ← modifier badge
+///   KW_DEF   #7982aa  4.8:1  muted blue   ← signature keywords (fn/pub/self)
+///   COMMENT  #565f89  2.8:1  dark grey    ← summary (intentionally below AA, skim tier)
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -18,7 +23,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::model::{AppState, PanelFocus};
+use crate::model::{AppState, FunctionInfo, PanelFocus};
 use super::highlight::tn;
 
 pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -26,10 +31,7 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
 
     let block = Block::default()
         .title(Line::from(vec![
-            Span::styled(
-                format!(" {} fns ", state.functions.len()),
-                Style::default().fg(tn::FG_DIM),
-            ),
+            Span::styled(" fns ", Style::default().fg(tn::FG_DIM)),
         ]))
         .borders(Borders::ALL)
         .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
@@ -42,9 +44,9 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
     if visible.is_empty() {
         frame.render_widget(
             Paragraph::new(if state.search_query.is_empty() {
-                " no functions — see source →".to_string()
+                " no functions — source view →"
             } else {
-                format!(" no match '{}'", state.search_query)
+                " no match"
             })
             .style(Style::default().fg(tn::FG_DARK).bg(tn::BG)),
             inner,
@@ -55,133 +57,103 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
     let w = inner.width as usize;
     let h = inner.height as usize;
 
+    // Does any function have an owner? Determines whether to show group headers.
+    let has_owners = visible.iter().any(|f| f.owner.is_some());
+
     let mut all_lines: Vec<Line> = Vec::new();
+    // Maps each rendered line index → function index in `visible`
     let mut line_fn_idx: Vec<usize> = Vec::new();
 
+    let mut last_owner: Option<Option<String>> = None; // None = no group rendered yet
+
     for (vi, func) in visible.iter().enumerate() {
+        let cur_owner = Some(func.owner.clone());
+
+        // ── Group header on owner transition ──────────────────────────────────
+        if has_owners && cur_owner != last_owner {
+            // Blank gap before second+ groups (not before first)
+            if last_owner.is_some() {
+                all_lines.push(Line::from(Span::raw("")));
+                line_fn_idx.push(vi);
+            }
+            all_lines.push(group_header_line(func.owner.as_deref(), w));
+            line_fn_idx.push(vi);
+            last_owner = cur_owner;
+        }
+
         let is_sel = vi == state.fn_selected;
         let bg = if is_sel { tn::BG_SEL } else { tn::BG };
 
         let (vis_kw, fn_name, params, ret) = decompose_sig(&func.signature);
 
-        // ── ROW 1: [▶/·] NAME → RetType           ↑N L123 ─────────────
+        // ── ROW 1: [▶/·] name → RetType              badges ──────────────────
         let arrow = if is_sel { "▶ " } else { "  " };
-        let name_w = (w / 2).min(fn_name.chars().count() + 2);
-        let ret_str = if ret.is_empty() { String::new() } else { format!("→ {}", ret) };
-        let badge_str = {
-            let mut b = String::new();
-            if !func.callers.is_empty() { b.push_str(&format!(" ↑{}", func.callers.len())); }
-            if !func.callees.is_empty() { b.push_str(&format!(" ↓{}", func.callees.len())); }
-            b.push_str(&format!(" L{}", func.line_range.0));
-            b
+        let name_fg = if is_sel { tn::SELECTED_FG } else { tn::NAME };
+
+        // Allocate width: name gets up to 45%, ret up to 22%, rest for badges
+        let name_max = (w * 45 / 100).max(8);
+        let ret_max  = (w * 22 / 100).max(4);
+
+        let badge_str = build_badge(func);
+        let badge_w = badge_str.chars().count();
+
+        // Truncate name and ret to fit
+        let name_trunc = take_w(&fn_name, name_max);
+        let ret_trunc  = if ret.is_empty() { String::new() } else {
+            take_w(&format!("→ {}", ret), ret_max)
         };
 
-        // Compute padding to push badges to the right
-        let used = 2 + fn_name.chars().count().min(name_w)
-            + if ret_str.is_empty() { 0 } else { 1 + ret_str.chars().count() };
-        let pad = w.saturating_sub(used + badge_str.chars().count() + 1);
+        // Padding between ret and badges
+        let used = 2 + name_trunc.chars().count()
+            + if ret_trunc.is_empty() { 0 } else { ret_trunc.chars().count() + 1 };
+        let pad = w.saturating_sub(used + badge_w).min(w);
 
         let mut row1 = vec![
-            Span::styled(arrow, Style::default()
-                .fg(if is_sel { tn::SELECTED_FG } else { tn::FG_DARK }).bg(bg)),
+            Span::styled(
+                arrow,
+                Style::default().fg(if is_sel { tn::OWNER } else { tn::FG_DARK }).bg(bg),
+            ),
         ];
-        // PRIMARY: function name, with search match highlighted
-        let name_fg = if is_sel { tn::SELECTED_FG } else { tn::NAME };
-        let name_trunc = take_w(&fn_name, name_w);
-        if !state.search_query.is_empty() && !is_sel {
-            let q = &state.search_query.to_lowercase();
-            let name_lower = name_trunc.to_lowercase();
-            if let Some(pos) = name_lower.find(q.as_str()) {
-                let before = &name_trunc[..pos];
-                let matched = &name_trunc[pos..pos + q.len()];
-                let after = &name_trunc[pos + q.len()..];
-                row1.push(Span::styled(before.to_string(),
-                    Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
-                row1.push(Span::styled(matched.to_string(),
-                    Style::default().fg(tn::STRING).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)));
-                row1.push(Span::styled(after.to_string(),
-                    Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
-            } else {
-                row1.push(Span::styled(name_trunc,
-                    Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
-            }
-        } else {
-            row1.push(Span::styled(name_trunc,
-                Style::default().fg(name_fg).bg(bg).add_modifier(Modifier::BOLD)));
-        }
-        if !ret_str.is_empty() {
+
+        // Name: with search-match highlighting when search is active
+        append_name_spans(&mut row1, &name_trunc, name_fg, &state.search_query, is_sel, bg);
+
+        if !ret_trunc.is_empty() {
             row1.push(Span::styled(" ", Style::default().bg(bg)));
-            // SECONDARY: return type
             row1.push(Span::styled(
-                take_w(&ret_str, w.saturating_sub(used + pad + badge_str.len())),
+                ret_trunc,
                 Style::default().fg(tn::TYPE_).bg(bg),
             ));
         }
-        // Filler + peripheral badges
-        row1.push(Span::styled(" ".repeat(pad.min(w)), Style::default().bg(bg)));
+        row1.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
         row1.push(Span::styled(badge_str, Style::default().fg(tn::FG_DARK).bg(bg)));
 
         all_lines.push(Line::from(row1));
         line_fn_idx.push(vi);
 
-        // ── ROW 2: tertiary sig + italic summary ──────────────────────
-        // Row 2: `pub fn (&mut self)` at 4.8:1 + summary at 2.8:1
-        let kw_part = if vis_kw.is_empty() { "fn ".to_string() }
-                      else { format!("{} fn ", vis_kw) };
-        let param_part = if params.is_empty() { String::new() }
-                         else { format!("({})", take_w(&params, 28)) };
-        let sig_part = take_w(&format!("  {}{}", kw_part, param_part), w / 2);
-
-        let summary_max = w.saturating_sub(sig_part.chars().count() + 4);
-        let summary_part = if func.summary.is_empty() { String::new() }
-                           else { format!("  \"{}\"", take_w(&func.summary, summary_max)) };
-
-        all_lines.push(Line::from(vec![
-            // TERTIARY: def-keywords (4.8:1) — readable but clearly subordinate
-            Span::styled(sig_part, Style::default().fg(tn::KW_DEF).bg(bg)),
-            // MUTED: summary (2.8:1) — intentionally below AA, skim tier
-            Span::styled(
-                summary_part,
-                Style::default().fg(tn::COMMENT).bg(bg).add_modifier(Modifier::ITALIC),
-            ),
-        ]));
+        // ── ROW 2: modifiers (params)   "summary" ────────────────────────────
+        all_lines.push(row2_line(func, &vis_kw, &params, bg, w));
         line_fn_idx.push(vi);
 
-        // ── ROW 3 (selected): call graph ──────────────────────────────
+        // ── ROW 3 (selected only): call graph ────────────────────────────────
         if is_sel && (!func.callees.is_empty() || !func.callers.is_empty()) {
-            let mut r3 = vec![Span::styled("  ", Style::default().bg(bg))];
-            if !func.callees.is_empty() {
-                r3.push(Span::styled("→ ", Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
-                r3.push(Span::styled(
-                    take_w(&func.callees.join("  "), w.saturating_sub(4) / 2),
-                    Style::default().fg(tn::FG_MED).bg(bg),
-                ));
-                r3.push(Span::styled("   ", Style::default().bg(bg)));
-            }
-            if !func.callers.is_empty() {
-                r3.push(Span::styled("← ", Style::default().fg(tn::CALLER_COLOR).bg(bg)));
-                r3.push(Span::styled(
-                    take_w(&func.callers.join("  "), w.saturating_sub(4) / 2),
-                    Style::default().fg(tn::FG_MED).bg(bg),
-                ));
-            }
-            all_lines.push(Line::from(r3));
+            all_lines.push(callgraph_line(func, bg, w));
             line_fn_idx.push(vi);
         }
 
-        // ── Thin divider (ghost level, 2.1:1) ────────────────────────
+        // ── Thin divider between functions ───────────────────────────────────
         if vi + 1 < visible.len() {
-            all_lines.push(Line::from(Span::styled(
-                format!("  {}", "─".repeat(w.saturating_sub(3))),
-                Style::default().fg(tn::BORDER_IDLE).bg(tn::BG),
-            )));
+            all_lines.push(divider_line(w));
             line_fn_idx.push(vi);
         }
     }
 
-    // Scroll to keep selected fn in view
-    let sel_start = line_fn_idx.iter().position(|&i| i == state.fn_selected).unwrap_or(0);
-    let scroll = sel_start.saturating_sub(h / 3);
+    // Scroll to keep selected function in view
+    let sel_first_line = line_fn_idx
+        .iter()
+        .position(|&i| i == state.fn_selected)
+        .unwrap_or(0);
+    let scroll = sel_first_line.saturating_sub(h / 4);
 
     let display: Vec<Line> = all_lines.into_iter().skip(scroll).take(h).collect();
     frame.render_widget(
@@ -190,23 +162,197 @@ pub fn render_function_list(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Line builders ───────────────────────────────────────────────────────────
 
-fn take_w(s: &str, max: usize) -> String {
-    if max == 0 { return String::new(); }
-    if s.chars().count() <= max { return s.to_string(); }
-    format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+fn group_header_line<'a>(owner: Option<&str>, w: usize) -> Line<'a> {
+    match owner {
+        Some(name) => {
+            // Format: ─ impl Name ─────────────────
+            let prefix = " impl ";
+            let suffix_len = w.saturating_sub(1 + prefix.len() + name.len() + 1);
+            let suffix = "─".repeat(suffix_len);
+            Line::from(vec![
+                Span::styled("─", Style::default().fg(tn::BORDER_IDLE)),
+                Span::styled(prefix, Style::default().fg(tn::FG_DARK)),
+                Span::styled(
+                    name.to_string(),
+                    Style::default().fg(tn::OWNER).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ", Style::default().fg(tn::BORDER_IDLE)),
+                Span::styled(suffix, Style::default().fg(tn::BORDER_IDLE)),
+            ])
+        }
+        None => {
+            // Free functions section
+            let label = "─ fn ";
+            let fill = "─".repeat(w.saturating_sub(label.len()));
+            Line::from(vec![
+                Span::styled(label.to_string(), Style::default().fg(tn::FG_DARK)),
+                Span::styled(fill, Style::default().fg(tn::BORDER_IDLE)),
+            ])
+        }
+    }
 }
+
+fn row2_line<'a>(
+    func: &FunctionInfo,
+    vis_kw: &str,
+    params: &str,
+    bg: ratatui::style::Color,
+    w: usize,
+) -> Line<'a> {
+    // Build: "  [async] (params…)   "summary""
+    let mut spans = vec![Span::styled("  ", Style::default().bg(bg))];
+
+    // async badge: violet, distinct from both warm and cool primary tokens
+    if func.is_async {
+        spans.push(Span::styled(
+            "⚡ ",
+            Style::default().fg(tn::ASYNC_TAG).bg(bg),
+        ));
+    }
+
+    // Visibility prefix (pub/pub(crate) etc.) — very muted, peripheral
+    if !vis_kw.is_empty() {
+        let filtered = vis_kw
+            .split_whitespace()
+            .filter(|&kw| kw != "async") // async shown via ⚡ badge
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !filtered.is_empty() {
+            spans.push(Span::styled(
+                format!("{} ", filtered),
+                Style::default().fg(tn::KW_DEF).bg(bg),
+            ));
+        }
+    }
+
+    // Self receiver — shown more prominently as it tells you if it's a method
+    let self_display = extract_self_display(params);
+    let rest_params  = params_without_self(params);
+
+    if !self_display.is_empty() {
+        spans.push(Span::styled(
+            format!("({})", self_display),
+            Style::default().fg(tn::KW_DEF).bg(bg),
+        ));
+        if !rest_params.is_empty() {
+            // Show count of additional params rather than full expansion (saves space)
+            let count = rest_params.split(',').count();
+            spans.push(Span::styled(
+                format!(" +{}", count),
+                Style::default().fg(tn::FG_DARK).bg(bg),
+            ));
+        }
+    } else if !rest_params.is_empty() {
+        // Free function: show first param hint
+        let hint = take_w(&rest_params, 20);
+        spans.push(Span::styled(
+            format!("({})", hint),
+            Style::default().fg(tn::KW_DEF).bg(bg),
+        ));
+    } else {
+        spans.push(Span::styled("()", Style::default().fg(tn::FG_DARK).bg(bg)));
+    }
+
+    // Summary — italic, intentionally at muted (2.8:1) contrast, skim tier
+    if !func.summary.is_empty() {
+        let so_far: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let avail = w.saturating_sub(so_far + 4);
+        if avail > 8 {
+            let summary = take_w(&func.summary, avail);
+            spans.push(Span::styled("  ", Style::default().bg(bg)));
+            spans.push(Span::styled(
+                format!("\"{}\"", summary),
+                Style::default()
+                    .fg(tn::COMMENT)
+                    .bg(bg)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
+
+    Line::from(spans)
+}
+
+fn callgraph_line<'a>(func: &FunctionInfo, bg: ratatui::style::Color, w: usize) -> Line<'a> {
+    let half = w.saturating_sub(4) / 2;
+    let mut spans = vec![Span::styled("  ", Style::default().bg(bg))];
+
+    if !func.callees.is_empty() {
+        spans.push(Span::styled("→ ", Style::default().fg(tn::CALLEE_COLOR).bg(bg)));
+        spans.push(Span::styled(
+            take_w(&func.callees.join("  "), half),
+            Style::default().fg(tn::FG_MED).bg(bg),
+        ));
+    }
+    if !func.callers.is_empty() {
+        spans.push(Span::styled("  ← ", Style::default().fg(tn::CALLER_COLOR).bg(bg)));
+        spans.push(Span::styled(
+            take_w(&func.callers.join("  "), half),
+            Style::default().fg(tn::FG_MED).bg(bg),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn divider_line<'a>(w: usize) -> Line<'a> {
+    Line::from(Span::styled(
+        format!("  {}", "·".repeat(w.saturating_sub(3))),
+        Style::default().fg(tn::BORDER_IDLE),
+    ))
+}
+
+fn build_badge(func: &FunctionInfo) -> String {
+    let mut b = String::new();
+    if !func.callers.is_empty() { b.push_str(&format!(" ↑{}", func.callers.len())); }
+    if !func.callees.is_empty() { b.push_str(&format!(" ↓{}", func.callees.len())); }
+    b.push_str(&format!(" L{}", func.line_range.0));
+    b
+}
+
+/// Append name spans — splits into before/match/after when search is active.
+fn append_name_spans(
+    spans: &mut Vec<Span<'static>>,
+    name: &str,
+    fg: ratatui::style::Color,
+    query: &str,
+    is_sel: bool,
+    bg: ratatui::style::Color,
+) {
+    let base_style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+
+    if !query.is_empty() && !is_sel {
+        let q_lower = query.to_lowercase();
+        let n_lower = name.to_lowercase();
+        if let Some(pos) = n_lower.find(q_lower.as_str()) {
+            let q_len = q_lower.len();
+            spans.push(Span::styled(name[..pos].to_string(), base_style));
+            spans.push(Span::styled(
+                name[pos..pos + q_len].to_string(),
+                Style::default()
+                    .fg(tn::STRING)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ));
+            spans.push(Span::styled(name[pos + q_len..].to_string(), base_style));
+            return;
+        }
+    }
+    spans.push(Span::styled(name.to_string(), base_style));
+}
+
+// ─── Signature decomposition ─────────────────────────────────────────────────
 
 /// Returns (visibility_keywords, fn_name, params_inner, return_type)
 fn decompose_sig(sig: &str) -> (String, String, String, String) {
-    let vis_kws = ["pub(crate)", "pub(super)", "pub", "async", "unsafe", "extern", "const"];
+    let vis_kws  = ["pub(crate)", "pub(super)", "pub", "async", "unsafe", "extern", "const"];
     let lang_kws = ["fn ", "def ", "function ", "func "];
 
     let mut rest = sig.trim();
-    let mut vis = Vec::new();
+    let mut vis  = Vec::new();
 
-    // Strip visibility/modifier keywords
     'outer: loop {
         for &kw in &vis_kws {
             if rest.starts_with(kw) {
@@ -221,7 +367,6 @@ fn decompose_sig(sig: &str) -> (String, String, String, String) {
         break;
     }
 
-    // Strip language keyword
     for kw in &lang_kws {
         if rest.starts_with(kw) {
             rest = &rest[kw.len()..];
@@ -229,9 +374,8 @@ fn decompose_sig(sig: &str) -> (String, String, String, String) {
         }
     }
 
-    // Function name (up to `(` or `<`)
     let name_end = rest.find(|c: char| c == '(' || c == '<' || c == ':').unwrap_or(rest.len());
-    let fn_name = rest[..name_end].trim().to_string();
+    let fn_name  = rest[..name_end].trim().to_string();
     rest = &rest[name_end..];
 
     // Skip generics
@@ -245,7 +389,6 @@ fn decompose_sig(sig: &str) -> (String, String, String, String) {
         rest = &rest[consumed..];
     }
 
-    // Params
     let params = if rest.starts_with('(') {
         let close = find_close_paren(rest);
         let inner = rest[1..close.saturating_sub(1)].trim().to_string();
@@ -255,7 +398,6 @@ fn decompose_sig(sig: &str) -> (String, String, String, String) {
         String::new()
     };
 
-    // Return type after `->`
     let ret = if let Some(p) = rest.find("->") {
         rest[p + 2..].trim().trim_end_matches('{').trim().to_string()
     } else {
@@ -273,4 +415,31 @@ fn find_close_paren(s: &str) -> usize {
         match ch { '(' => depth += 1, ')' => { depth -= 1; if depth == 0 { return i; } } _ => {} }
     }
     i
+}
+
+/// Extract the self-receiver display from a params string.
+fn extract_self_display(params: &str) -> &str {
+    let s = params.trim();
+    if s.starts_with("&mut self") { "&mut self" }
+    else if s.starts_with("&self")  { "&self" }
+    else if s.starts_with("mut self") { "mut self" }
+    else if s.starts_with("self")   { "self" }
+    else { "" }
+}
+
+/// Params string with the self receiver removed.
+fn params_without_self(params: &str) -> String {
+    let s = params.trim();
+    for prefix in &["&mut self, ", "&self, ", "mut self, ", "self, ", "&mut self", "&self", "mut self", "self"] {
+        if s.starts_with(prefix) {
+            return s[prefix.len()..].trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
+fn take_w(s: &str, max: usize) -> String {
+    if max == 0 { return String::new(); }
+    if s.chars().count() <= max { return s.to_string(); }
+    format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
 }

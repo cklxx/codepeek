@@ -15,17 +15,29 @@ pub fn render_source_view(frame: &mut Frame, state: &AppState, area: Rect) {
     let file_name = state.file_path.file_name()
         .and_then(|n| n.to_str()).unwrap_or("?");
 
-    // Title shows file + selected fn context
-    let ctx = state.selected_fn()
-        .map(|f| format!("  {}  ", f.name))
-        .unwrap_or_default();
+    // Title: filename  Owner::fn_name  (owner in amber, fn in blue — same contrast hierarchy as fn list)
+    let mut title_spans = vec![
+        Span::raw(" "),
+        Span::styled(file_name, Style::default().fg(tn::FG_MED)),
+    ];
+    if let Some(f) = state.selected_fn() {
+        title_spans.push(Span::styled("  ", Style::default()));
+        if let Some(owner) = &f.owner {
+            title_spans.push(Span::styled(
+                owner.clone(),
+                Style::default().fg(tn::OWNER).add_modifier(Modifier::BOLD),
+            ));
+            title_spans.push(Span::styled("::", Style::default().fg(tn::FG_DARK)));
+        }
+        title_spans.push(Span::styled(
+            f.name.clone(),
+            Style::default().fg(tn::NAME).add_modifier(Modifier::BOLD),
+        ));
+        title_spans.push(Span::raw("  "));
+    }
 
     let block = Block::default()
-        .title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(file_name, Style::default().fg(tn::FG_MED)),
-            Span::styled(ctx, Style::default().fg(tn::NAME).add_modifier(Modifier::BOLD)),
-        ]))
+        .title(Line::from(title_spans))
         .borders(Borders::ALL)
         .border_type(if focused { BorderType::Rounded } else { BorderType::Plain })
         .border_style(Style::default().fg(
